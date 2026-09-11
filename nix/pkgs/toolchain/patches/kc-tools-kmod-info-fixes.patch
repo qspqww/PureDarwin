@@ -2,21 +2,16 @@ diff --git a/lib/linker.c b/lib/linker.c
 index 102e429..36ea9b3 100644
 --- a/lib/linker.c
 +++ b/lib/linker.c
-@@ -675,8 +675,15 @@ static uint64_t va_to_foff(
+@@ -675,8 +675,12 @@ static uint64_t va_to_foff(
    return UINT64_MAX;
  }
  
--#define KMOD_OFF_ADDR_64 156
--#define KMOD_OFF_SIZE_64 164
-+/* kmod_info_t on 64-bit: name[64] ends at 0x50, version[64] ends at 0x90,
-+ * reference_count (int32) sits at 0x90, then 4 bytes of padding before the
-+ * 8-byte-aligned reference_list at 0x98. address is therefore 0xa0 (160)
-+ * and size 0xa8 (168). The previous 156/164 straddled the padding and
-+ * clobbered reference_list/address for kexts whose data section has no
-+ * relocation records (e.g. kexts linked natively on macOS). The 32-bit
-+ * layout has no padding, so 148/152 stay correct. */
-+#define KMOD_OFF_ADDR_64 160
-+#define KMOD_OFF_SIZE_64 168
++/* kmod_info_t is #pragma pack(4) in the kernel (osfmk/mach/kmod.h),
++ * so the 64-bit address/size slots really are at 156/164 (reference_list
++ * at 0x94 with no padding). The start/stop slots below are likewise the
++ * packed offsets 0xb4/0xbc, NOT the natural-alignment 0xb8/0xc0. */
+ #define KMOD_OFF_ADDR_64 156
+ #define KMOD_OFF_SIZE_64 164
  #define KMOD_OFF_ADDR_32 148
  #define KMOD_OFF_SIZE_32 152
  
@@ -49,8 +44,8 @@ index 102e429..36ea9b3 100644
 +    if (sc) {
 +      const uint8_t *nl = lk->linked_data + sc->symoff;
 +      const char *strtab = (const char *)(lk->linked_data + sc->stroff);
-+      const uint32_t start_off = mv.is64 ? 0xb8 : 0xa0;
-+      const uint32_t stop_off  = mv.is64 ? 0xc0 : 0xa4;
++      const uint32_t start_off = mv.is64 ? 0xb4 : 0xa0;
++      const uint32_t stop_off  = mv.is64 ? 0xbc : 0xa4;
 +      uint64_t start_va = 0;
 +      uint64_t stop_va  = 0;
 +

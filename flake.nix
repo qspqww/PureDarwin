@@ -120,13 +120,15 @@
           # ld, efi-app-aarch64 objcopy). Note buildPackages: the cross
           # scope's own binutils attr is built FOR the aarch64-linux runtime
           # and cannot execute on a Darwin host.
-          # kc-tools with two fixes required for kexts linked natively on
-          # macOS (see the patch header for details):
-          #  - kmod_info address/size field offsets on 64-bit were 4 bytes
-          #    off (156/164 -> 160/168), clobbering reference_list/address;
-          #  - kmod_info.start/stop are now rewritten from the slid symtab,
-          #    because natively-linked kexts carry no relocation records for
-          #    those slots and the kernel rejects them on load.
+          # kc-tools with the kmod_info fix required for kexts linked
+          # natively on macOS (see the patch header for details):
+          # kmod_info.start/stop are rewritten from the slid symtab at the
+          # packed (pack(4)) offsets 0xb4/0xbc, because natively-linked
+          # kexts carry no relocation records for those slots and the kernel
+          # rejects them on load. (The address/size slots stay at the
+          # packed offsets 156/164 - an earlier revision of this patch moved
+          # them to 160/168 assuming natural alignment, which made the kernel
+          # read a wild kmod address and fault in getcommandfromheader.)
           patchedKcTools = (kc-tools.packages.${system}.default).overrideAttrs (old: {
             patches = (old.patches or [ ]) ++ [
               ./nix/pkgs/toolchain/patches/kc-tools-kmod-info-fixes.patch
