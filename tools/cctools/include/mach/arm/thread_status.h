@@ -77,7 +77,7 @@ typedef _STRUCT_ARM_EXCEPTION_STATE64	arm_exception_state64_t;
  */
 #if defined(__arm__)
 typedef _STRUCT_ARM_DEBUG_STATE			arm_debug_state_t;
-#elif defined(__arm64__)
+#elif defined(__arm64__) || defined(__aarch64__)
 typedef _STRUCT_ARM_LEGACY_DEBUG_STATE		arm_debug_state_t;
 #else
 /* #error Undefined architecture */
