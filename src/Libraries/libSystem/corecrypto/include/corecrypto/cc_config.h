@@ -159,7 +159,7 @@
 #endif
 
 #if !defined(CCN_UNIT_SIZE)
- #if defined(__arm64__) || defined(__x86_64__)  || defined(_WIN64) 
+ #if defined(__arm64__) || defined(__aarch64__) || defined(__x86_64__)  || defined(_WIN64) 
   #define CCN_UNIT_SIZE  8
  #elif defined(__arm__) || defined(__i386__) || defined(_WIN32)
   #define CCN_UNIT_SIZE  4
