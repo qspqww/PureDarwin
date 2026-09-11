@@ -33,7 +33,12 @@ target_sources(libSystem_B_stub PRIVATE
     # libobjc references; libmacho isn't otherwise compiled into PD libSystem.
     ${CMAKE_SOURCE_DIR}/tools/cctools/libmacho/getsecbyname.c
     # NXGetArchInfo* - also libmacho, and also part of libSystem on Darwin.
-    ${CMAKE_SOURCE_DIR}/tools/cctools/libmacho/arch.c)
+    ${CMAKE_SOURCE_DIR}/tools/cctools/libmacho/arch.c
+    # Apple Blocks ABI aliases (__Block_copy/...): -fblocks lowering references
+    # the two-underscore source names while the Swift-derived runtime defines
+    # the one-underscore spellings. Defined here (not only in libdyld) so the
+    # export list below resolves without depending on reexported symbols.
+    ${CMAKE_SOURCE_DIR}/src/Libraries/libSystem/libdispatch/src/BlocksRuntime/blocks_abi_compat.c)
 
 target_link_options(libSystem_B_stub PRIVATE
     -compatibility_version 1.0.0

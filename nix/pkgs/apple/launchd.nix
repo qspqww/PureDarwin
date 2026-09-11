@@ -33,7 +33,8 @@ stdenv.mkDerivation {
       -I${iokit}/include \
       -fuse-ld=${nativeLd}/bin/ld -nostdlib \
       -Wl,-dylib_file,/usr/lib/system/libdyld.dylib:${libSystem}/usr/lib/system/libdyld.dylib \
-      -L${libSystem}/usr/lib -L${corefoundation}/usr/lib -L${iokit}/usr/lib \
+      -L${libSystem}/usr/lib -L${libSystem}/usr/lib/system -L${corefoundation}/usr/lib -L${iokit}/usr/lib \
+      -Wl,-dylib_file,/usr/lib/system/libdyld.dylib:${libSystem}/usr/lib/system/libdyld.dylib \
       -Wl,-dylinker_install_name,/usr/lib/dyld \
       -Wl,-platform_version,macos,11.0,11.5 \
       -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_launchd_static.a \

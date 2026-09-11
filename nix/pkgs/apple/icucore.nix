@@ -49,8 +49,14 @@ stdenv.mkDerivation {
       CFLAGS="-isysroot $DARWIN_SDK_ROOT -I${libSystem}/usr/include ${lib.optionalString (!isArmv6) "-mmacosx-version-min=11.0"}" \
       CXXFLAGS="-isysroot $DARWIN_SDK_ROOT -I${libSystem}/usr/include ${lib.optionalString (!isArmv6) "-mmacosx-version-min=11.0"} ${lib.optionalString isArmv6 "-O1"}" \
       LDFLAGS="-fuse-ld=${nativeLd}/bin/ld -nostdlib -L${libSystem}/usr/lib -Wl,-dylib_file,/usr/lib/system/libdyld.dylib:${libSystem}/usr/lib/system/libdyld.dylib ${lib.optionalString (!isArmv6) "-Wl,-platform_version,macos,11.0,11.5 -Wl,-fixup_chains"} ${lib.optionalString (libcxxabiDylib != null) "-L${libcxxabiDylib}/usr/lib -lc++abi"} -lSystem ${lib.optionalString (compilerRt != null) "${compilerRt}/lib/libcompiler_rt.a"}" \
+      # On a Darwin host the target triple equals the host machine, so
+      # autoconf concludes this is a native build and its DATA conditional
+      # (tools=true || cross_compiling=yes) drops the data subdirectory -
+      # leaving libicudata unbuilt. Pass an explicit build alias distinct
+      # from --host so autoconf sets cross_compiling=yes.
       ../source/configure \
         --host=${targetTriple} \
+        --build=aarch64-darwin \
         --with-cross-build=$PWD/../native-build \
         --disable-renaming \
         --disable-tests --disable-samples --disable-extras --disable-icuio \

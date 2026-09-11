@@ -10,7 +10,7 @@
 , mtools
 , e2fsprogs
 , fakeroot
-, apfsprogs
+, apfsprogs ? null
 , iana-etc
 , glib
 , hfsprogs ? null
@@ -51,7 +51,11 @@ stdenv.mkDerivation {
 
   dontUnpack = true;
 
-  nativeBuildInputs = [ gptfdisk util-linux dosfstools mtools e2fsprogs fakeroot apfsprogs ]
+  # apfsprogs is optional: the APFS test partition is not currently created
+  # (only ESP + root), and mkfs.apfs has no Darwin-host build, so the image
+  # must assemble without it.
+  nativeBuildInputs = [ gptfdisk util-linux dosfstools mtools e2fsprogs fakeroot ]
+    ++ lib.optional (apfsprogs != null) apfsprogs
     ++ lib.optionals (rootFsType == "hfs") [ hfsprogs libdmg-hfsplus ];
 
   buildPhase = ''
@@ -798,6 +802,6 @@ ${lib.optionalString (!netbootOnly) ''
 
   meta = with lib; {
     description = "Bootable PureDarwin GPT disk image (xnu-loader ESP + kc-tools kernel collection + ext4 BaseSystem root + APFS test container)";
-    platforms = platforms.linux;
+    platforms = platforms.unix;
   };
 }

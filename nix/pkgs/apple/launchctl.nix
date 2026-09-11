@@ -40,7 +40,8 @@ stdenv.mkDerivation {
       -F${corefoundation}/System/Library/Frameworks \
       -I${iokit}/include \
       -fuse-ld=${nativeLd}/bin/ld -nostdlib \
-      -L${libSystem}/usr/lib -L${corefoundation}/usr/lib -L${iokit}/usr/lib \
+      -L${libSystem}/usr/lib -L${libSystem}/usr/lib/system -L${corefoundation}/usr/lib -L${iokit}/usr/lib \
+      -Wl,-dylib_file,/usr/lib/system/libdyld.dylib:${libSystem}/usr/lib/system/libdyld.dylib \
       -Wl,-platform_version,macos,11.0,11.5 \
       -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_libxpc_static.a \
       -Wl,-U,_OBJC_CLASS_\$_NSObject \

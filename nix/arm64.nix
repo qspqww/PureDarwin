@@ -1529,9 +1529,16 @@ let
   # only the toolchain leaves it pulling the x86_64 libIOKitCF.a, whose objects
   # the linker skips as wrong-architecture - producing a valid, and completely
   # empty, arm64 dylib rather than any error.
+  # extraCmakeFlags must be overridden too: the base definition bakes the
+  # x86_64 CoreFoundation prefix into the flags, which would drag the whole
+  # x86 closure into this arm64 build's inputs.
   iokitCFStaticArm64Build = iokitCFStaticBuild.override {
     puredarwinArch = "arm64";
     inherit arm64CrossToolchain;
+    extraCmakeFlags = [
+      "-DPUREDARWIN_ENABLE_IOKITCF=ON"
+      "-DPUREDARWIN_COREFOUNDATION_PREFIX=${coreFoundationArm64Build}"
+    ];
   };
   iokitArm64Build = iokitBuild.override {
     darwinCrossToolchain = arm64CrossToolchain;
@@ -1611,7 +1618,6 @@ let
     iokit = iokitArm64Build;
   };
   mkArm64Build = file: deps:
-  if isDarwin then null else
   let
   f = import file;
   common = {

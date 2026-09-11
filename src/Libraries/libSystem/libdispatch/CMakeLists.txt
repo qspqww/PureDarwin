@@ -42,6 +42,11 @@ target_sources(libdispatch_static PRIVATE
     src/shims/yield.c
     src/BlocksRuntime/data.c
     src/BlocksRuntime/runtime.c
+    # Apple Blocks ABI aliases: clang's -fblocks lowering references the
+    # two-underscore names (__Block_copy, __NSConcreteGlobalBlock, ...) while
+    # this runtime defines the one-underscore spellings. See the file for why
+    # these forwarders are required for every -fblocks consumer to link.
+    src/BlocksRuntime/blocks_abi_compat.c
     ${CMAKE_CURRENT_BINARY_DIR}/protocol.c
     ${CMAKE_CURRENT_BINARY_DIR}/protocolServer.c
     compat-include/pd_libdispatch_link_gaps.c

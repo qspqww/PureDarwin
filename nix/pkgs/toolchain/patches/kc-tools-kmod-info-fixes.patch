@@ -1,0 +1,96 @@
+diff --git a/lib/linker.c b/lib/linker.c
+index 102e429..36ea9b3 100644
+--- a/lib/linker.c
++++ b/lib/linker.c
+@@ -675,8 +675,15 @@ static uint64_t va_to_foff(
+   return UINT64_MAX;
+ }
+ 
+-#define KMOD_OFF_ADDR_64 156
+-#define KMOD_OFF_SIZE_64 164
++/* kmod_info_t on 64-bit: name[64] ends at 0x50, version[64] ends at 0x90,
++ * reference_count (int32) sits at 0x90, then 4 bytes of padding before the
++ * 8-byte-aligned reference_list at 0x98. address is therefore 0xa0 (160)
++ * and size 0xa8 (168). The previous 156/164 straddled the padding and
++ * clobbered reference_list/address for kexts whose data section has no
++ * relocation records (e.g. kexts linked natively on macOS). The 32-bit
++ * layout has no padding, so 148/152 stay correct. */
++#define KMOD_OFF_ADDR_64 160
++#define KMOD_OFF_SIZE_64 168
+ #define KMOD_OFF_ADDR_32 148
+ #define KMOD_OFF_SIZE_32 152
+ 
+@@ -829,6 +836,73 @@ int patch_kmod_info(LinkedKext *lk) {
+     w32(lk->linked_data + size_foff, (uint32_t)image_size);
+   }
+ 
++  /*
++   * Rewrite kmod_info.start/stop with the kext's relocated addresses.
++   *
++   * KMOD_EXPLICIT_DECL seeds these fields with the addresses of the kext's
++   * _start/_stop functions. When the kext's data section carries classic
++   * relocation records (Linux-host cross builds), the relocation pass above
++   * relocates the slots and everything works. Kexts linked natively on macOS
++   * have no relocation records: the static initialiser keeps the unslid file
++   * VA, and the kernel rejects the kext on load with "module start pointer is
++   * outside of kext range".
++   *
++   * The LC_SYMTAB in the linked image has already been slid (link_kext adds
++   * load_vmaddr to every N_SECT symbol), so look __start/__stop up there and
++   * overwrite both fields unconditionally - for a relocatable kext this
++   * writes exactly what the relocation would have produced.
++   */
++  {
++    const struct symtab_command *sc = NULL;
++    for (MACHO_EACH_LC(&mv, lc)) {
++      if (((const struct load_command *)lc)->cmd == LC_SYMTAB)
++        sc = (const struct symtab_command *)lc;
++    }
++    if (sc) {
++      const uint8_t *nl = lk->linked_data + sc->symoff;
++      const char *strtab = (const char *)(lk->linked_data + sc->stroff);
++      const uint32_t start_off = mv.is64 ? 0xb8 : 0xa0;
++      const uint32_t stop_off  = mv.is64 ? 0xc0 : 0xa4;
++      uint64_t start_va = 0;
++      uint64_t stop_va  = 0;
++
++      for (uint32_t i = 0; i < sc->nsyms; i++) {
++        MachoSym sym;
++        macho_sym_get(&mv, nl, i, &sym);
++        if (sym.n_type & N_STAB)
++          continue;
++        if ((sym.n_type & 0x0e) != N_SECT)
++          continue;
++        const char *name = strtab + sym.n_strx;
++        if (!strcmp(name, "__start"))
++          start_va = sym.n_value;
++        else if (!strcmp(name, "__stop"))
++          stop_va = sym.n_value;
++      }
++
++      if (start_va && stop_va) {
++        uint64_t s_foff = va_to_foff(lk->linked_data, lk->linked_size,
++                                     lk->kmod_info_addr + start_off, kmod_field);
++        uint64_t e_foff = va_to_foff(lk->linked_data, lk->linked_size,
++                                     lk->kmod_info_addr + stop_off, kmod_field);
++        if (s_foff != UINT64_MAX && e_foff != UINT64_MAX) {
++          if (mv.is64) {
++            w64(lk->linked_data + s_foff, start_va);
++            w64(lk->linked_data + e_foff, stop_va);
++          } else {
++            w32(lk->linked_data + s_foff, (uint32_t)start_va);
++            w32(lk->linked_data + e_foff, (uint32_t)stop_va);
++          }
++          fprintf(stderr,
++              " patched kmod_info: %s start=0x%llx stop=0x%llx\n",
++              lk->bundle_id ? lk->bundle_id : "<unknown>",
++              (unsigned long long)start_va,
++              (unsigned long long)stop_va);
++        }
++      }
++    }
++  }
++
+   fprintf(stderr,
+       " patched kmod_info: %s "
+       "kmod=0x%llx address=0x%llx size=0x%llx\n",

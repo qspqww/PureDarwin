@@ -96,7 +96,20 @@
 , iomediacheckBuild
 , ioregBuild
 , isDarwin
+, compilerRtArm64Build
+, libSystemArm64Build
+, icuCoreArm64Build
+, libcxxabiDylibArm64Build
+, libcxxDylibArm64Build
+, libobjcArm64Build
+, coreFoundationArm64Build
+, iokitArm64Build
+, launchdArm64Build
+, launchctlArm64Build
+, userlandArm64Build
 , kc-tools
+, xnuLoaderDarwin ? null
+, kcTools ? null
 , kernelArm64Build
 , kernelArm64VirtBuild
 , kernelArm64VirtDebugBuild
@@ -652,6 +665,33 @@ let
     basesystem = fullBuild;
     basesystem-split = splitBaseSystem;
     default = fullBuild;
+    kc-arm64 = kcArm64ReleaseBuild;
+    kc-arm64-debug = kcArm64DebugBuild;
+    kc-arm64-t8010 = kcArm64T8010ReleaseBuild;
+    kc-arm64-t8010-debug = kcArm64T8010DebugBuild;
+    kc-arm64-bcm2837 = kcArm64Bcm2837ReleaseBuild;
+    kc-arm64-bcm2837-debug = kcArm64Bcm2837DebugBuild;
+    image-arm64-virt-minimal = imageArm64VirtMinimalBuild;
+    # arm64 base-system components. All of these are .override twins of the
+    # x86_64 builds; on Linux the linuxPackages set below carries its own
+    # arm64 names where it has them, and these attributes are otherwise the
+    # only place they are exposed.
+    compiler-rt-arm64 = compilerRtArm64Build;
+    libsystem-arm64 = libSystemArm64Build;
+    icucore-arm64 = icuCoreArm64Build;
+    libcxxabi-dylib-arm64 = libcxxabiDylibArm64Build;
+    libcxx-dylib-arm64 = libcxxDylibArm64Build;
+    libobjc-arm64 = libobjcArm64Build;
+    corefoundation-arm64 = coreFoundationArm64Build;
+    iokit-arm64 = iokitArm64Build;
+    launchd-arm64 = launchdArm64Build;
+    launchctl-arm64 = launchctlArm64Build;
+    userland-arm64 = userlandArm64Build;
+    zsh-arm64 = zshArm64Build;
+    libiconv-arm64 = libiconvArm64Build;
+    toybox-arm64 = toyboxArm64Build;
+    asmjit-test-arm64 = asmjitTestArm64Build;
+    basesystem-arm64-virt-minimal = splitBaseSystemArm64VirtMinimal;
     # fbdoom (GPL) builds from an external checkout supplied via
     # PUREDARWIN_FBDOOM_SOURCE_ENV. Without it the source is null, so only
     # publish the attribute when it is set; otherwise the whole package set
@@ -726,65 +766,91 @@ let
     #perl = perlBuild;
   };
 
+  # Arm64 kernel collections are pure runCommand assemblies of the (un-gated)
+  # arm64 kernel and kext builds with kc-tools, so they are host-portable and
+  # are exposed for Darwin hosts too; the x86_64 kc and the images stay
+  # Linux-only below.
+  kcArm64DebugBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64.nix {
+    kernel = kernelArm64VirtDebugBuild;
+    kexts = kextsArm64Build;
+    kcTools = kcTools;
+  };
+  kcArm64ReleaseBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64.nix {
+    kernel = kernelArm64VirtBuild;
+    kexts = kextsArm64Build;
+    kcTools = kcTools;
+  };
+  kcArm64T8010DebugBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64-t8010.nix {
+    kernel = kernelArm64T8010DebugBuild;
+    kexts = kextsArm64Build;
+    kcTools = kcTools;
+  };
+  kcArm64T8010ReleaseBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64-t8010.nix {
+    kernel = kernelArm64T8010Build;
+    kexts = kextsArm64Build;
+    kcTools = kcTools;
+  };
+  kcArm64Bcm2837ReleaseBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64-bcm2837.nix {
+    kernel = kernelArm64Bcm2837Build;
+    kexts = kextsArm64Build;
+    kcTools = kcTools;
+  };
+  kcArm64Bcm2837DebugBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64-bcm2837.nix {
+    kernel = kernelArm64Bcm2837DebugBuild;
+    kexts = kextsArm64Build;
+    kcTools = kcTools;
+  };
+
+  # The arm64-virt-minimal image is host-portable now that the arm64 kernel,
+  # kexts and KC assemble on Darwin too. The loader is the upstream Linux
+  # cross build on Linux, or the Darwin-host native port there. apfsprogs is
+  # not passed: the APFS test partition is never created and mkfs.apfs has no
+  # Darwin-host build.
+  imageArm64VirtMinimalBuild = pkgs.callPackage ../image.nix {
+    baseSystem = splitBaseSystemArm64VirtMinimal;
+    extraPackages = [ zshArm64Build libiconvArm64Build toyboxArm64Build asmjitTestArm64Build ];
+    kc = kcArm64DebugBuild;
+    xnuLoader = if isDarwin then xnuLoaderDarwin else xnu-loader.packages.${system}.arm64-virt;
+    # callPackage would otherwise auto-fill pkgs.apfsprogs (Linux-only) despite
+    # the ? null default; keep the APFS tool out of the Darwin-host image.
+    apfsprogs = if isDarwin then null else pkgs.apfsprogs;
+    efiBinary = "BOOTAA64.EFI";
+    espMB = 768;
+    rootMB = 512;
+    imageFileName = "puredarwin-arm64-virt-minimal.img";
+    ramdiskMB = 512;
+    bootArgs = "-v debug=0x218 -nogzalloc_mode keepsyms=1 serial=3 gopconsole=1 pdtrace=1 serial_video_mirror=1 no_interrupt_masked_debug=1 rd=md0";
+  };
+
   linuxPackages =
     let
       kcBuild = pkgs.callPackage ./pkgs/toolchain/kc.nix {
         kernel = kernelBuild;
         kexts = kextsBuild;
-        kcTools = kc-tools.packages.${system}.default;
+        kcTools = kcTools;
       };
       kcDebugBuild = pkgs.callPackage ./pkgs/toolchain/kc.nix {
         kernel = kernelDebugBuild;
         kexts = kextsBuild;
-        kcTools = kc-tools.packages.${system}.default;
-      };
-      kcArm64DebugBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64.nix {
-        kernel = kernelArm64VirtDebugBuild;
-        kexts = kextsArm64Build;
-        kcTools = kc-tools.packages.${system}.default;
-      };
-      kcArm64ReleaseBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64.nix {
-        kernel = kernelArm64VirtBuild;
-        kexts = kextsArm64Build;
-        kcTools = kc-tools.packages.${system}.default;
-      };
-      kcArm64T8010DebugBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64-t8010.nix {
-        kernel = kernelArm64T8010DebugBuild;
-        kexts = kextsArm64Build;
-        kcTools = kc-tools.packages.${system}.default;
-      };
-      kcArm64T8010ReleaseBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64-t8010.nix {
-        kernel = kernelArm64T8010Build;
-        kexts = kextsArm64Build;
-        kcTools = kc-tools.packages.${system}.default;
-      };
-      kcArm64Bcm2837ReleaseBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64-bcm2837.nix {
-        kernel = kernelArm64Bcm2837Build;
-        kexts = kextsArm64Build;
-        kcTools = kc-tools.packages.${system}.default;
-      };
-      kcArm64Bcm2837DebugBuild = pkgs.callPackage ./pkgs/toolchain/kc-arm64-bcm2837.nix {
-        kernel = kernelArm64Bcm2837DebugBuild;
-        kexts = kextsArm64Build;
-        kcTools = kc-tools.packages.${system}.default;
+        kcTools = kcTools;
       };
       prelinkedArm32Bcm2835Build =
         pkgs.callPackage ./pkgs/toolchain/prelinked-arm32-bcm2835.nix {
           kernel = kernelArm32Bcm2835Build;
           kexts = kextsArm32Bcm2835Build;
-          kcTools = kc-tools.packages.${system}.default;
+          kcTools = kcTools;
         };
       prelinkedArm32Bcm2835DevBuild =
         pkgs.callPackage ./pkgs/toolchain/prelinked-arm32-bcm2835.nix {
           kernel = kernelArm32Bcm2835DevBuild;
           kexts = kextsArm32Bcm2835Build;
-          kcTools = kc-tools.packages.${system}.default;
+          kcTools = kcTools;
         };
       prelinkedArm32Bcm2835DebugBuild =
         pkgs.callPackage ./pkgs/toolchain/prelinked-arm32-bcm2835.nix {
           kernel = kernelArm32Bcm2835DebugBuild;
           kexts = kextsArm32Bcm2835Build;
-          kcTools = kc-tools.packages.${system}.default;
+          kcTools = kcTools;
         };
       imageExtraPackages = lib.attrValues imageExtraPackageSet
         ++ lib.optional (fbdoomExternalSrc != null) fbdoomBuild;
@@ -824,19 +890,6 @@ let
         apfsprogs = pkgs.apfsprogs;
         efiBinary = "BOOTAA64.EFI";
         imageFileName = "puredarwin-arm64-virt.img";
-      };
-      imageArm64VirtMinimalBuild = pkgs.callPackage ../image.nix {
-        baseSystem = splitBaseSystemArm64VirtMinimal;
-        extraPackages = [ zshArm64Build libiconvArm64Build toyboxArm64Build asmjitTestArm64Build ];
-        kc = kcArm64DebugBuild;
-        xnuLoader = xnu-loader.packages.${system}.arm64-virt;
-        apfsprogs = pkgs.apfsprogs;
-        efiBinary = "BOOTAA64.EFI";
-        espMB = 768;
-        rootMB = 512;
-        imageFileName = "puredarwin-arm64-virt-minimal.img";
-        ramdiskMB = 512;
-        bootArgs = "-v debug=0x218 -nogzalloc_mode keepsyms=1 serial=3 gopconsole=1 pdtrace=1 serial_video_mirror=1 no_interrupt_masked_debug=1 rd=md0";
       };
       netbootArm64VirtMinimalBuild = pkgs.callPackage ../image.nix {
         baseSystem = splitBaseSystemArm64VirtMinimal;

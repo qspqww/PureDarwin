@@ -96,7 +96,10 @@
           darwinCrossToolchain = pkgs.callPackage ./nix/pkgs/toolchain/toolchain.nix {
             inherit nativeLd;
           };
-          arm64CrossToolchain = if isDarwin then null else pkgs.callPackage ./nix/pkgs/toolchain/toolchain.nix {
+          # toolchain.nix is host-portable: on a Darwin host these wrappers pin
+          # the target triple, the pinned SDK and the linker (pkgs.ld64), which
+          # is what every arm64 consumer wants there too.
+          arm64CrossToolchain = pkgs.callPackage ./nix/pkgs/toolchain/toolchain.nix {
             inherit nativeLd;
             target = "arm64-apple-darwin20.4";
             clangTarget = "arm64-apple-macosx11.0";
@@ -107,6 +110,35 @@
             inherit nativeLd;
             target = "armv6-apple-darwin20.4";
             clangTarget = "armv6-apple-darwin20.4";
+          };
+          # Darwin-host build of the arm64 xnu-loader: freestanding aarch64
+          # code compiled with the host clang pinned to an aarch64-linux
+          # target, linked with the aarch64 cross binutils against a gnu-efi
+          # built the same way. The upstream flake's pkgsCross route needs a
+          # full Linux cross stdenv, which is not viable on a Darwin host.
+          # GNU binutils running ON this host, targeting aarch64 Linux (ELF
+          # ld, efi-app-aarch64 objcopy). Note buildPackages: the cross
+          # scope's own binutils attr is built FOR the aarch64-linux runtime
+          # and cannot execute on a Darwin host.
+          # kc-tools with two fixes required for kexts linked natively on
+          # macOS (see the patch header for details):
+          #  - kmod_info address/size field offsets on 64-bit were 4 bytes
+          #    off (156/164 -> 160/168), clobbering reference_list/address;
+          #  - kmod_info.start/stop are now rewritten from the slid symtab,
+          #    because natively-linked kexts carry no relocation records for
+          #    those slots and the kernel rejects them on load.
+          patchedKcTools = (kc-tools.packages.${system}.default).overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [
+              ./nix/pkgs/toolchain/patches/kc-tools-kmod-info-fixes.patch
+            ];
+          });
+          aarch64CrossBinutils = pkgs.pkgsCross.aarch64-multiplatform.buildPackages.binutils;
+          gnuEfiAarch64 = pkgs.callPackage ./nix/pkgs/toolchain/gnu-efi-aarch64.nix {
+            inherit aarch64CrossBinutils;
+          };
+          xnuLoaderDarwin = pkgs.callPackage ./nix/pkgs/toolchain/xnu-loader-native.nix {
+            xnuLoaderSrc = xnu-loader;
+            inherit aarch64CrossBinutils gnuEfiAarch64;
           };
           nativeUnifdef = pkgs.callPackage ./nix/pkgs/toolchain/unifdef.nix { };
           nativeMigcom = pkgs.callPackage ./nix/pkgs/toolchain/migcom.nix { };
@@ -1236,7 +1268,15 @@
               nativeTblgen = "${pkgs.llvmPackages_21.llvm}/bin/llvm-tblgen";
             };
           nativeMesonToolsDir =
-            if isDarwin then null else pkgs.runCommand "puredarwin-native-meson-tools" { } ''
+            # A Darwin host already has otool/install_name_tool in nixpkgs'
+            # cctools; only the Linux cross builds need the vendored copies.
+            if isDarwin
+            then pkgs.runCommand "puredarwin-native-meson-tools-darwin" { } ''
+              mkdir -p $out/bin
+              ln -s ${pkgs.cctools}/bin/otool $out/bin/otool
+              ln -s ${pkgs.cctools}/bin/install_name_tool $out/bin/install_name_tool
+            ''
+            else pkgs.runCommand "puredarwin-native-meson-tools" { } ''
               mkdir -p $out/bin
               ln -s ${hostOtoolBuild}/bin/otool $out/bin/otool
               ln -s ${hostOtoolBuild}/bin/install_name_tool $out/bin/install_name_tool
@@ -2593,19 +2633,19 @@
               inherit (pkgs) xorgproto;
             };
           ncursesBuild =
-            if isDarwin then null else pkgs.callPackage ./nix/pkgs/base/ncurses.nix {
+            pkgs.callPackage ./nix/pkgs/base/ncurses.nix {
               inherit darwinCrossToolchain nativeLd;
               libSystem = libSystemBuild;
               ncurses = pkgs.ncurses;
             };
           libiconvBuild =
-            if isDarwin then null else pkgs.callPackage ./nix/pkgs/base/libiconv.nix {
+            pkgs.callPackage ./nix/pkgs/base/libiconv.nix {
               inherit darwinCrossToolchain nativeLd;
               libSystem = libSystemBuild;
               libiconvReal = pkgs.libiconvReal;
             };
           toyboxBuild =
-            if isDarwin then null else pkgs.callPackage ./nix/pkgs/base/toybox.nix {
+            pkgs.callPackage ./nix/pkgs/base/toybox.nix {
               inherit darwinCrossToolchain nativeLd;
               libSystem = libSystemBuild;
               toybox = pkgs.toybox;
@@ -2715,7 +2755,7 @@
               zlib = xvfbZlibBuild;
             };
           zshBuild =
-            if isDarwin then null else pkgs.callPackage ./nix/pkgs/base/zsh.nix {
+            pkgs.callPackage ./nix/pkgs/base/zsh.nix {
               inherit darwinCrossToolchain nativeLd;
               libSystem = libSystemBuild;
               zsh = pkgs.zsh;
@@ -3643,7 +3683,7 @@
             enableIOGraphicsFamily = true;
           };
           # Image contents (see nix/image-contents.nix).
-          imageContents = import ./nix/image-contents.nix {
+          imageContents = import ./nix/image-contents.nix ({
             inherit
               atspi2CoreBuild autoconfBuild automakeBuild bisonBuild bmakeBuild cairoBuild
               cairoGobjectBuild cctoolsBuild coreFoundationBuild curlBuild darwinCrossToolchain
@@ -3655,10 +3695,15 @@
               freetype2Build fribidiBuild garconBuild gdkPixbufBuild gitBuild glibBuild gnum4Build
               gnumakeBuild gtk3Build gtkLayerShellBuild gtk3NoxBuild gtkLayerShellNoxBuild onyx2dBuild coregraphicsBuild cgScreenDemoBuild cairoNoxBuild dbusNoxBuild pdEpollShimBuild tllistBuild fcftBuild footBuild userlandNoxBuild pangoNoxBuild netsurfNoxBuild libepoxyNoxBuild fastfetchNoxBuild harfbuzzNoxBuild atspi2CoreNoxBuild cairoGobjectNoxBuild xkbcommonNoxBuild mesaNoxBuild openglFrameworkNoxBuild mesaDemosNoxBuild librsvgNoxBuild harfbuzzBuild i3Build i3statusShimBuild iceauthBuild
               cursorThemeBuild iconThemesBuild icuCoreBuild imageExtraPackagesArm64 imageExtraPackagesArm64Nox iographicsBuild iokitBuild asmjitTestArm64Build
+              xnuLoaderDarwin
               iomediacheckBuild ioregBuild isDarwin jsoncBuild kc-tools kernelArm64Build kernelArm64VirtBuild
               kernelArm64VirtDebugBuild kernelArm64T8010Build kernelArm64T8010DebugBuild kernelArm64Bcm2837Build kernelArm64Bcm2837DebugBuild kernelArm32Bcm2835Build kernelArm32Bcm2835DebugBuild kernelArm32Bcm2835DevBuild
               kextsArm32Bcm2835Build compilerRtArmv6Build
               kernelBuild kernelDebugBuild kextsArm64Build kextsBuild
+              compilerRtArm64Build libSystemArm64Build icuCoreArm64Build
+              libcxxabiDylibArm64Build libcxxDylibArm64Build libobjcArm64Build
+              coreFoundationArm64Build iokitArm64Build launchdArm64Build
+              launchctlArm64Build userlandArm64Build
               launchctlBuild launchdBuild lib libSystemBuild libdrmBuild libXftBuild libapfsrwBuild libcssBuild waylandBuild waylandProtocolsBuild wlrootsBuild swayBuild wlrootsNoxBuild swayNoxBuild
               pdsurfaceBuild libgbmBuild libcurlDylibBuild libcxxDylibBuild libcxxTestBuild libcxxabiDylibBuild libdisplayInfoBuild
               libdomBuild libepoxyBuild libevBuild libffiBuild libhubbubBuild libiconvArm64Build
@@ -3685,7 +3730,7 @@
               webkitgtkBuild libsoupBuild sqliteBuild libpslBuild nghttp2Build
               libgcryptBuild libgpgErrorBuild libtasn1Build libjpegBuild libwebpBuild
               ;
-          };
+          } // { kcTools = patchedKcTools; });
           inherit (imageContents)
             fullBuild
             splitBaseSystem
@@ -3994,6 +4039,8 @@
           packages = {
             apple-sdk = appleSdk;
             cg-screen-demo = cgScreenDemoBuild;
+            gnu-efi-aarch64 = gnuEfiAarch64;
+            xnu-loader-darwin = xnuLoaderDarwin;
           } // commonPackages // arm64Packages // probePackages // lib.optionalAttrs (!isDarwin) linuxPackages;
           apps = lib.optionalAttrs (!isDarwin) linuxApps;
           devShells = {

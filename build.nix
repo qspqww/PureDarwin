@@ -195,9 +195,12 @@ EOF
       -DCMAKE_OSX_SYSROOT="$DARWIN_SDK_ROOT" \
       -DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $DARWIN_SDK_ROOT/usr/include/c++/v1" \
   '' + ''
-      -DPUREDARWIN_ARCH=${puredarwinArch} \
-      ${lib.optionalString (activeCompilerRt != null)
-        "-DPUREDARWIN_COMPILER_RT_PREFIX=${activeCompilerRt} \\"}
+      ${lib.concatStringsSep " \\\n      " (lib.filter (v: v != null) [
+        "-DPUREDARWIN_ARCH=${puredarwinArch}"
+        (if activeCompilerRt != null
+         then "-DPUREDARWIN_COMPILER_RT_PREFIX=${activeCompilerRt}"
+         else null)
+      ])} \
       -DPUREDARWIN_ENABLE_PROJECTS=${if enableProjects then "ON" else "OFF"} \
       -DPUREDARWIN_ENABLE_KERNEL=${if enableKernel then "ON" else "OFF"} \
       -DPUREDARWIN_ENABLE_LIBRARIES=${if enableLibraries then "ON" else "OFF"} \

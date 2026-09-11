@@ -298,7 +298,9 @@ _valloc
 _sysdir_start_search_path_enumeration
 _sysdir_get_next_search_path_enumeration
 __NSConcreteStackBlock
+___NSConcreteStackBlock
 __NSConcreteGlobalBlock
+___NSConcreteGlobalBlock
 _malloc_default_zone
 _vm_page_size
 __NSGetArgv
@@ -319,9 +321,13 @@ _asl_send
 _asl_free
 _asl_close
 __Block_copy
+___Block_copy
 __Block_release
+___Block_release
 __Block_object_assign
+___Block_object_assign
 __Block_object_dispose
+___Block_object_dispose
 __dispatch_get_main_queue_port_4CF
 __dispatch_main_queue_callback_4CF
 __dispatch_runloop_root_queue_create_4CF

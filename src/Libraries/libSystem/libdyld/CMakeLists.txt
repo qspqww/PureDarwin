@@ -45,7 +45,12 @@ target_sources(libdyld PRIVATE
     # Block_copy/Block_release: atexit_b()'s block-based atexit variant (same
     # translation unit as atexit()) needs the ObjC-block runtime support funcs.
     ${CMAKE_SOURCE_DIR}/src/Libraries/libSystem/libdispatch/src/BlocksRuntime/data.c
-    ${CMAKE_SOURCE_DIR}/src/Libraries/libSystem/libdispatch/src/BlocksRuntime/runtime.c)
+    ${CMAKE_SOURCE_DIR}/src/Libraries/libSystem/libdispatch/src/BlocksRuntime/runtime.c
+    # Apple Blocks ABI aliases (__Block_copy/... forwarders): -fblocks lowering
+    # references the two-underscore spellings, the runtime above defines the
+    # one-underscore ones. Every -fblocks consumer links against libSystem and
+    # needs these through it. See blocks_abi_compat.c.
+    ${CMAKE_SOURCE_DIR}/src/Libraries/libSystem/libdispatch/src/BlocksRuntime/blocks_abi_compat.c)
 
 
 set_source_files_properties(${DYLD_SRC_DIR}/src/start_glue.s PROPERTIES
