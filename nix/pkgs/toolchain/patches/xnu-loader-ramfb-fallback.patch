@@ -1,0 +1,502 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 91c4f6b..2bdb7fc 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -55,6 +55,7 @@ set(SOURCES
+   src/jump.S
+   src/lowmem.c
+   src/macho.c
++  src/ramfb.c
+   src/serial.c
+ )
+ 
+diff --git a/include/ramfb.h b/include/ramfb.h
+new file mode 100644
+index 0000000..71c8510
+--- /dev/null
++++ b/include/ramfb.h
+@@ -0,0 +1,34 @@
++#ifndef RAMFB_H
++#define RAMFB_H
++
++#include "common.h"
++#include "boot.h"
++
++/* QEMU ramfb fallback framebuffer (aarch64/QEMU-virt only).
++ *
++ * When the firmware offers no usable GOP (e.g. EDK2 built without a display
++ * driver for the attached device, or a GOP with no linear modes), and the
++ * user passed "ramfb" (optionally "ramfb=WxH") on the kernel command line,
++ * drive QEMU's ramfb device directly through fw_cfg: allocate a reserved
++ * framebuffer, hand it to the host, and report it like a GOP mode so XNU
++ * publishes IOGOPFramebuffer and Xorg's puredarwingop driver attaches.
++ *
++ * Never touches hardware unless all three gates pass: the "ramfb" boot-arg,
++ * QEMU's ACPI OEM ID, and the fw_cfg signature. Any failure leaves
++ * out->found FALSE (headless), which is not an error.
++ */
++#if defined(__aarch64__)
++EFI_STATUS ramfb_fallback_video(AppContext *ctx, const CHAR8 *cmdline, boot_video_info *out);
++#else
++static inline EFI_STATUS
++ramfb_fallback_video(AppContext *ctx, const CHAR8 *cmdline, boot_video_info *out)
++{
++  (VOID)ctx;
++  (VOID)cmdline;
++  if (out)
++    out->found = FALSE;
++  return EFI_SUCCESS;
++}
++#endif
++
++#endif
+diff --git a/src/boot.c b/src/boot.c
+index c9d56c2..0a33530 100644
+--- a/src/boot.c
++++ b/src/boot.c
+@@ -2,6 +2,7 @@
+ #include "console.h"
+ #include "devtree.h"
+ #include "fileio.h"
++#include "ramfb.h"
+ #include "serial.h"
+ #include <efiprot.h>
+ 
+@@ -497,6 +498,10 @@ EFI_STATUS boot_build_args(
+  * outcome - no GOP at all, or only Blt-only modes - which is not an error: XNU
+  * boots fine on the serial console with v_display zeroed.
+  *
++ * On aarch64, both headless outcomes first try the QEMU ramfb fallback
++ * (ramfb_fallback_video): with -device ramfb and the "ramfb" boot-arg the
++ * loader programs the host-side framebuffer itself, no firmware GOP needed.
++ *
+  * Split out from boot_fill_video() because arm64's Boot_Video is the same six
+  * fields at 64 bits wide, so only the probe can be shared, not the assignment.
+  */
+@@ -526,8 +531,12 @@ static EFI_STATUS boot_probe_video(
+    * located are treated as fatal, since those indicate a broken GOP rather
+    * than its absence. */
+   if (EFI_ERROR(status) || !gop || !gop->Mode || !gop->Mode->Info) {
+-    log_info(L"boot_probe_video: no usable GOP (%r), continuing headless\r\n", status);
++    log_info(L"boot_probe_video: no usable GOP (%r), trying ramfb\r\n", status);
++#if defined(__aarch64__)
++    return ramfb_fallback_video(ctx, cmdline, out);
++#else
+     return EFI_SUCCESS;
++#endif
+   }
+ 
+   /* XNU needs a LINEAR framebuffer.  The firmware's current GOP mode is
+@@ -560,8 +569,12 @@ static EFI_STATUS boot_probe_video(
+       }
+       if (best_mode == gop->Mode->MaxMode) {
+         log_info(L"boot_probe_video: current mode not linear and no linear mode "
+-                 L"found, continuing headless\r\n");
++                 L"found, trying ramfb\r\n");
++#if defined(__aarch64__)
++        return ramfb_fallback_video(ctx, cmdline, out);
++#else
+         return EFI_SUCCESS;
++#endif
+       }
+       log_info(L"boot_probe_video: current mode not linear, switching to mode %u\r\n",
+                best_mode);
+diff --git a/src/ramfb.c b/src/ramfb.c
+new file mode 100644
+index 0000000..10f096a
+--- /dev/null
++++ b/src/ramfb.c
+@@ -0,0 +1,393 @@
++/*
++ * QEMU ramfb fallback framebuffer (aarch64/QEMU-virt only).
++ *
++ * QEMU's ramfb ("ram framebuffer standalone device") displays whatever guest
++ * RAM the guest programs into it - no firmware driver needed. Programming
++ * goes through fw_cfg file "etc/ramfb" (24 bytes, every field big-endian):
++ *
++ *   struct RAMFBCfg { u64 addr; u32 fourcc; u32 flags; u32 width; u32 height;
++ *                     u32 stride; };   // stride in BYTES per scanline
++ *
++ * (see QEMU hw/display/ramfb.c). fw_cfg PIO data writes are ignored since
++ * QEMU 2.4, so the 24 bytes go out through the fw_cfg DMA interface. The
++ * file's selector comes from the fw_cfg file directory (key 0x19).
++ *
++ * Cache care (real caches under KVM/HVF, not just TCG): the DMA payload and
++ * the access element are cleaned to the point of coherency before triggering,
++ * and the access element is invalidated before polling. The framebuffer
++ * itself is zeroed and cleaned once, so the host does not show stale garbage.
++ * All DMA addresses are physical == virtual (EDK2 identity-maps RAM).
++ */
++#include "ramfb.h"
++#include "console.h"
++#include <efiprot.h>
++
++#if defined(__aarch64__)
++
++/* mach-virt fw_cfg MMIO base. Only touched after the "ramfb" boot-arg,
++ * QEMU's ACPI OEM ID, and the fw_cfg signature all check out. */
++#define RAMFB_FW_CFG_BASE       0x09020000ULL
++#define RAMFB_FW_CFG_DATA       0x00ULL /* 64-bit, byte reads used */
++#define RAMFB_FW_CFG_SELECTOR   0x08ULL /* 16-bit, big-endian */
++#define RAMFB_FW_CFG_DMA        0x10ULL /* 64-bit, big-endian */
++
++#define FW_CFG_SIG_KEY          0x0000
++#define FW_CFG_ID_KEY           0x0001
++#define FW_CFG_FILE_DIR_KEY     0x0019
++#define FW_CFG_FILE_MAX_ENTRIES 256
++#define FW_CFG_DMA_BIT          0x02u
++#define FW_CFG_DMA_CTL_ERROR    0x01u
++#define FW_CFG_DMA_CTL_SELECT   0x08u
++#define FW_CFG_DMA_CTL_WRITE    0x10u
++#define FW_CFG_DMA_MAX_SPINS    1000000
++
++#define RAMFB_DEF_WIDTH         1024
++#define RAMFB_DEF_HEIGHT        768
++#define RAMFB_MAX_WIDTH         2560 /* VBE_DISPI_MAX_XRES, enforced by ramfb */
++#define RAMFB_MAX_HEIGHT        1600 /* VBE_DISPI_MAX_YRES, enforced by ramfb */
++/* DRM_FORMAT_XRGB8888. LE bytes B,G,R,X match GOP BGRX. */
++#define RAMFB_FOURCC_XRGB8888   0x34325258u
++
++/* QEMU RAMFBCfg: 24 bytes, big-endian on the wire. */
++struct ramfb_cfg {
++  UINT64 addr;
++  UINT32 fourcc;
++  UINT32 flags;
++  UINT32 width;
++  UINT32 height;
++  UINT32 stride;
++};
++
++/* fw_cfg DMA access element, big-endian. */
++struct fw_cfg_dma_access {
++  UINT32 control;
++  UINT32 length;
++  UINT64 address;
++};
++
++static UINT16 ramfb_swap16(UINT16 v)
++{
++  return (UINT16)((v >> 8) | (v << 8));
++}
++
++static UINT32 ramfb_swap32(UINT32 v)
++{
++  return ((v >> 24) & 0xFFu) | ((v >> 8) & 0xFF00u) |
++         ((v << 8) & 0xFF0000u) | ((v << 24) & 0xFF000000u);
++}
++
++static UINT64 ramfb_swap64(UINT64 v)
++{
++  return ((UINT64)ramfb_swap32((UINT32)v) << 32) |
++         (UINT64)ramfb_swap32((UINT32)(v >> 32));
++}
++
++static UINT8 ramfb_mmio_read8(UINT64 addr)
++{
++  return *(volatile UINT8 *)(UINTN)addr;
++}
++
++static VOID ramfb_mmio_write16(UINT64 addr, UINT16 v)
++{
++  *(volatile UINT16 *)(UINTN)addr = v;
++}
++
++static VOID ramfb_mmio_write32(UINT64 addr, UINT32 v)
++{
++  *(volatile UINT32 *)(UINTN)addr = v;
++}
++
++/* Clean + invalidate a RAM range to the point of coherency (DC CIVAC). */
++static VOID ramfb_dcache_clean_invalidate(UINT64 addr, UINT64 len)
++{
++  UINT64 ctr, linesz, end;
++  __asm__ volatile ("mrs %0, ctr_el0" : "=r" (ctr));
++  linesz = (UINT64)4 << ((ctr >> 16) & 0xF);
++  end = addr + len;
++  addr &= ~(linesz - 1);
++  while (addr < end) {
++    __asm__ volatile ("dc civac, %0" :: "r" (addr));
++    addr += linesz;
++  }
++  __asm__ volatile ("dsb sy" ::: "memory");
++}
++
++/* TRUE when the firmware's ACPI tables carry QEMU's OEM ID. The RSDP itself
++ * carries it at offset 9 ("RSD PTR " + checksum + 6-byte OEMID). */
++static BOOLEAN ramfb_acpi_is_qemu(AppContext *ctx)
++{
++  static const EFI_GUID acpi20 = ACPI_20_TABLE_GUID;
++  UINT64 rsdp = 0;
++  UINTN i;
++  CHAR8 *oem;
++
++  if (!ctx || !ctx->st)
++    return FALSE;
++  for (i = 0; i < ctx->st->NumberOfTableEntries; i++) {
++    EFI_CONFIGURATION_TABLE *e = &ctx->st->ConfigurationTable[i];
++    if (CompareMem(&e->VendorGuid, &acpi20, sizeof(EFI_GUID)) == 0) {
++      rsdp = (UINT64)(UINTN)e->VendorTable;
++      break;
++    }
++  }
++  if (!rsdp || *(UINT64 *)(UINTN)rsdp != 0x2052545020445352ULL)
++    return FALSE;
++  oem = (CHAR8 *)(UINTN)(rsdp + 9);
++  log_info(L"ramfb: ACPI OEM ID '%c%c%c%c%c%c'\r\n",
++           oem[0], oem[1], oem[2], oem[3], oem[4], oem[5]);
++  return oem[0] == 'B' && oem[1] == 'O' && oem[2] == 'C' &&
++         oem[3] == 'H' && oem[4] == 'S' && oem[5] == ' ';
++}
++
++static BOOLEAN ramfb_cmdline_has_flag(const CHAR8 *cmdline, const CHAR8 *flag)
++{
++  UINTN i, flen = 0;
++  if (!cmdline || !flag)
++    return FALSE;
++  while (flag[flen])
++    flen++;
++  for (i = 0; cmdline[i]; i++) {
++    UINTN j;
++    if (i != 0 && cmdline[i - 1] != ' ')
++      continue;
++    for (j = 0; j < flen && cmdline[i + j] == flag[j]; j++)
++      ;
++    if (j == flen && (cmdline[i + j] == '\0' || cmdline[i + j] == ' ' ||
++                      cmdline[i + j] == '='))
++      return TRUE;
++  }
++  return FALSE;
++}
++
++/* "ramfb" or "ramfb=WxH" on the command line. Malformed geometry falls back
++ * to the default rather than disabling the feature. */
++static BOOLEAN ramfb_parse_arg(const CHAR8 *cmdline, UINT32 *w, UINT32 *h)
++{
++  const CHAR8 *p;
++  UINT32 width = RAMFB_DEF_WIDTH, height = RAMFB_DEF_HEIGHT;
++
++  if (!cmdline || !w || !h)
++    return FALSE;
++  for (p = cmdline; *p; p++) {
++    UINT32 nw = 0, nh = 0;
++    if (p != cmdline && p[-1] != ' ')
++      continue;
++    if (p[0] != 'r' || p[1] != 'a' || p[2] != 'm' || p[3] != 'f' || p[4] != 'b')
++      continue;
++    p += 5;
++    if (*p == '=') {
++      p++;
++      while (*p >= '0' && *p <= '9') {
++        nw = nw * 10 + (UINT32)(*p - '0');
++        p++;
++      }
++      if ((*p == 'x' || *p == 'X')) {
++        p++;
++        while (*p >= '0' && *p <= '9') {
++          nh = nh * 10 + (UINT32)(*p - '0');
++          p++;
++        }
++      }
++      if ((*p && *p != ' ') || nw < 16 || nw > RAMFB_MAX_WIDTH ||
++          nh < 16 || nh > RAMFB_MAX_HEIGHT) {
++        log_info(L"ramfb: bad geometry, using %ux%u\r\n", width, height);
++      } else {
++        width = nw;
++        height = nh;
++      }
++    } else if (*p && *p != ' ') {
++      continue; /* "ramfbfoo" is not our token */
++    }
++    *w = width;
++    *h = height;
++    return TRUE;
++  }
++  return FALSE;
++}
++
++static VOID ramfb_select(UINT16 key)
++{
++  ramfb_mmio_write16(RAMFB_FW_CFG_BASE + RAMFB_FW_CFG_SELECTOR,
++                     ramfb_swap16(key));
++}
++
++static VOID ramfb_read_bytes(UINT8 *dst, UINTN len)
++{
++  while (len--)
++    *dst++ = ramfb_mmio_read8(RAMFB_FW_CFG_BASE + RAMFB_FW_CFG_DATA);
++}
++
++static BOOLEAN ramfb_check_signature(VOID)
++{
++  UINT8 sig[4];
++  ramfb_select(FW_CFG_SIG_KEY);
++  ramfb_read_bytes(sig, 4);
++  return sig[0] == 'Q' && sig[1] == 'E' && sig[2] == 'M' && sig[3] == 'U';
++}
++
++static BOOLEAN ramfb_dma_capable(VOID)
++{
++  UINT8 id[4];
++  UINT32 v;
++  ramfb_select(FW_CFG_ID_KEY);
++  ramfb_read_bytes(id, 4);
++  v = (UINT32)id[0] | ((UINT32)id[1] << 8) |
++      ((UINT32)id[2] << 16) | ((UINT32)id[3] << 24);
++  return (v & FW_CFG_DMA_BIT) != 0;
++}
++
++/* Locate a file in the fw_cfg directory (all multi-byte fields big-endian). */
++static BOOLEAN ramfb_find_file(const CHAR8 *name, UINT16 *sel_out, UINT32 *size_out)
++{
++  UINT8 hdr[4];
++  UINT32 count, i;
++
++  ramfb_select(FW_CFG_FILE_DIR_KEY);
++  ramfb_read_bytes(hdr, 4);
++  count = ((UINT32)hdr[0] << 24) | ((UINT32)hdr[1] << 16) |
++          ((UINT32)hdr[2] << 8) | hdr[3];
++  if (count == 0 || count > FW_CFG_FILE_MAX_ENTRIES)
++    return FALSE;
++  for (i = 0; i < count; i++) {
++    UINT8 e[64];
++    UINT32 size;
++    UINT16 sel;
++    UINTN k;
++    ramfb_read_bytes(e, 64);
++    size = ((UINT32)e[0] << 24) | ((UINT32)e[1] << 16) |
++           ((UINT32)e[2] << 8) | e[3];
++    sel = (UINT16)(((UINT16)e[4] << 8) | e[5]);
++    for (k = 0; k < 56; k++) {
++      if (e[8 + k] != (UINT8)name[k])
++        break;
++      if (name[k] == '\0') {
++        *sel_out = sel;
++        *size_out = size;
++        return TRUE;
++      }
++    }
++  }
++  return FALSE;
++}
++
++/* Write len bytes from buf (physical == virtual) to a fw_cfg file via DMA. */
++static EFI_STATUS ramfb_dma_write(AppContext *ctx, UINT16 sel, VOID *buf, UINT32 len)
++{
++  struct fw_cfg_dma_access *acc = NULL;
++  EFI_STATUS status;
++  UINTN spins = 0;
++  UINT32 ctl;
++
++  status = uefi_call_wrapper(ctx->bs->AllocatePool, 3,
++                             EfiLoaderData, sizeof(*acc), (VOID **)&acc);
++  if (EFI_ERROR(status))
++    return status;
++
++  acc->control = ramfb_swap32(((UINT32)sel << 16) |
++                              FW_CFG_DMA_CTL_SELECT | FW_CFG_DMA_CTL_WRITE);
++  acc->length  = ramfb_swap32(len);
++  acc->address = ramfb_swap64((UINT64)(UINTN)buf);
++
++  ramfb_dcache_clean_invalidate((UINT64)(UINTN)buf, len);
++  ramfb_dcache_clean_invalidate((UINT64)(UINTN)acc, sizeof(*acc));
++
++  /* Trigger: high half first, the low-half write starts the transfer. */
++  {
++    UINT64 phys = (UINT64)(UINTN)acc;
++    ramfb_mmio_write32(RAMFB_FW_CFG_BASE + RAMFB_FW_CFG_DMA,
++                       ramfb_swap32((UINT32)(phys >> 32)));
++    ramfb_mmio_write32(RAMFB_FW_CFG_BASE + RAMFB_FW_CFG_DMA + 4,
++                       ramfb_swap32((UINT32)phys));
++  }
++
++  do {
++    ramfb_dcache_clean_invalidate((UINT64)(UINTN)acc, sizeof(*acc));
++    ctl = ramfb_swap32(acc->control);
++    if (++spins > FW_CFG_DMA_MAX_SPINS) {
++      status = EFI_TIMEOUT;
++      goto out;
++    }
++  } while (ctl != 0 && !(ctl & FW_CFG_DMA_CTL_ERROR));
++  status = (ctl & FW_CFG_DMA_CTL_ERROR) ? EFI_DEVICE_ERROR : EFI_SUCCESS;
++
++out:
++  uefi_call_wrapper(ctx->bs->FreePool, 1, acc);
++  return status;
++}
++
++EFI_STATUS ramfb_fallback_video(AppContext *ctx, const CHAR8 *cmdline, boot_video_info *out)
++{
++  UINT32 width, height;
++  UINT16 sel;
++  UINT32 fsize;
++  EFI_PHYSICAL_ADDRESS fb = 0xFFFFFFFFULL;
++  UINTN pages;
++  EFI_STATUS status;
++  struct ramfb_cfg cfg;
++
++  if (!ctx || !out)
++    return EFI_INVALID_PARAMETER;
++  out->found = FALSE;
++
++  if (!ramfb_parse_arg(cmdline, &width, &height))
++    return EFI_SUCCESS; /* not requested: stay headless */
++  if (!ramfb_acpi_is_qemu(ctx)) {
++    log_info(L"ramfb: firmware is not QEMU, skipping\r\n");
++    return EFI_SUCCESS;
++  }
++  if (!ramfb_check_signature()) {
++    log_info(L"ramfb: no fw_cfg signature, skipping\r\n");
++    return EFI_SUCCESS;
++  }
++  if (!ramfb_dma_capable()) {
++    log_info(L"ramfb: fw_cfg has no DMA interface, skipping\r\n");
++    return EFI_SUCCESS;
++  }
++  if (!ramfb_find_file("etc/ramfb", &sel, &fsize) || fsize < sizeof(cfg)) {
++    log_info(L"ramfb: no etc/ramfb fw_cfg file (run QEMU with -device ramfb), skipping\r\n");
++    return EFI_SUCCESS;
++  }
++
++  /* Reserved so the kernel never hands these pages out; below 4GB. */
++  pages = ((UINT64)width * height * 4 + EFI_PAGE_MASK) / EFI_PAGE_SIZE;
++  status = uefi_call_wrapper(ctx->bs->AllocatePages, 4,
++                             AllocateMaxAddress, EfiReservedMemoryType,
++                             pages, &fb);
++  if (EFI_ERROR(status)) {
++    log_error(L"ramfb: cannot reserve %u pages: %r\r\n", (UINT32)pages, status);
++    return EFI_SUCCESS;
++  }
++
++  cfg.addr   = ramfb_swap64((UINT64)fb);
++  cfg.fourcc = ramfb_swap32(RAMFB_FOURCC_XRGB8888);
++  cfg.flags  = 0;
++  cfg.width  = ramfb_swap32(width);
++  cfg.height = ramfb_swap32(height);
++  cfg.stride = ramfb_swap32(width * 4);
++
++  status = ramfb_dma_write(ctx, sel, &cfg, sizeof(cfg));
++  if (EFI_ERROR(status)) {
++    log_error(L"ramfb: fw_cfg DMA write failed: %r\r\n", status);
++    uefi_call_wrapper(ctx->bs->FreePages, 2, fb, pages);
++    return EFI_SUCCESS;
++  }
++
++  /* Start black, and push it out of the data cache so the host sees black
++   * instead of stale garbage. */
++  SetMem((VOID *)(UINTN)fb, pages * EFI_PAGE_SIZE, 0);
++  ramfb_dcache_clean_invalidate((UINT64)fb, pages * EFI_PAGE_SIZE);
++
++  out->found = TRUE;
++  out->base_addr = (UINT64)fb;
++  out->row_bytes = (UINT64)width * 4;
++  out->width = width;
++  out->height = height;
++  out->depth = 32;
++  out->display = ramfb_cmdline_has_flag(cmdline, "-v") ? FB_TEXT_MODE : GRAPHICS_MODE;
++
++  log_info(L"ramfb: %ux%u stride=%u fb=0x%lx\r\n",
++           width, height, width * 4, (UINT64)fb);
++  return EFI_SUCCESS;
++}
++
++#endif /* __aarch64__ */

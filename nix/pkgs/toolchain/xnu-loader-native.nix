@@ -57,6 +57,12 @@ stdenv.mkDerivation {
 
   src = xnuLoaderSrc;
 
+  # QEMU ramfb fallback framebuffer (GOP-independent display for -device
+  # ramfb). Upstream has no display path when the firmware offers no usable
+  # GOP; the patch drives ramfb directly through fw_cfg behind the "ramfb"
+  # boot-arg. aarch64-only code, x86 builds unchanged.
+  patches = [ ./patches/xnu-loader-ramfb-fallback.patch ];
+
   nativeBuildInputs = [
     python3
     cmake
