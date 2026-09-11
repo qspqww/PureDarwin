@@ -6,6 +6,7 @@
 , pkg-config
 , darwinCrossToolchain
 , nativeLd
+, clangUnwrapped
 , libSystem
 , dbus
 , expat
@@ -23,8 +24,11 @@
 
 let
   targetInfo = import ../../lib/target-info.nix targetTriple;
-  rawClang = "/nix/store/h6wfr7hsc4013lzp1igizkcd1awx8mcm-clang-21.1.8/bin/clang";
-  rawClangxx = "/nix/store/h6wfr7hsc4013lzp1igizkcd1awx8mcm-clang-21.1.8/bin/clang++";
+  # Raw (unwrapped) clang: the meson cross file passes its own -target and
+  # -isysroot, which the nixpkgs wrapper would fight with. Referenced as a
+  # proper input - never hardcode a store path, it differs per host platform.
+  rawClang = "${clangUnwrapped}/bin/clang";
+  rawClangxx = "${clangUnwrapped}/bin/clang++";
 in
 stdenv.mkDerivation {
   pname = "puredarwin-dbus${lib.optionalString (!withX11) "-nox"}";

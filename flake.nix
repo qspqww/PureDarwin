@@ -841,6 +841,7 @@
           dbusBuild =
             if isDarwin then null else pkgs.callPackage ./nix/pkgs/gtk/dbus.nix {
               inherit darwinCrossToolchain nativeLd;
+              clangUnwrapped = pkgs.llvmPackages_21.clang-unwrapped;
               libSystem = libSystemBuild;
               expat = expatBuild;
               libX11 = xlibBuild;

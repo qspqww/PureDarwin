@@ -119,6 +119,7 @@ let
   dbusArm64Build = mkArm64Build ./pkgs/gtk/dbus.nix {
     expat = expatArm64Build;
     libX11 = xlibArm64Build;
+    clangUnwrapped = pkgs.llvmPackages_21.clang-unwrapped;
     inherit (pkgs) dbus meson ninja python3;
   };
   dilloArm64Build = mkArm64Build ./pkgs/apps/dillo.nix {
