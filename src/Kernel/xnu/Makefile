@@ -35,7 +35,11 @@ export MakeInc_dir=${VERSDIR}/makedefs/MakeInc.dir
 UNAME_S := $(shell uname -s)
 
 ifeq ($(UNAME_S),Linux)
-	export SYSCTL_HW_PHYSICALCPU := $(shell grep -E '^core id' /proc/cpuinfo | sort -u | wc -l)
+# ARM64 Linux /proc/cpuinfo has no '^core id' lines (x86-only); fall back
+# to the processor count so this is never 0. A 0 here makes
+# KERNEL_BUILDS_IN_PARALLEL 0, which sends the stripe-grouping recursion
+# in MakeInc.top into infinite recursion and segfaults make.
+	export SYSCTL_HW_PHYSICALCPU := $(shell c=$$(grep -E '^core id' /proc/cpuinfo | sort -u | wc -l); if [ "$$c" -eq 0 ]; then grep -cE '^processor' /proc/cpuinfo; else echo $$c; fi)
 	export SYSCTL_HW_LOGICALCPU  := $(shell grep -E '^processor' /proc/cpuinfo | sort -u | wc -l)
 else
 	export SYSCTL_HW_PHYSICALCPU := $(shell /usr/sbin/sysctl -n hw.physicalcpu)
